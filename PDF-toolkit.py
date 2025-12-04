@@ -702,30 +702,50 @@ def crack_pdf_with_john(pdf_path, wordlist, log_widget):
 # ABYSS TOOLKIT FUNCTIONS
 # =====================================================================
 
-def compress_pdf_list(file_list, quality, log_widget):
+def compress_pdf_list(file_list, dpi, log_widget, delete_original=False):
     """Compress PDFs using Ghostscript."""
-    quality_map = {
-        "screen": "/screen",
-        "ebook": "/ebook",
-        "printer": "/printer"
-    }
-    gs_quality = quality_map.get(quality, "/ebook")
+    dpi_setting = str(int(dpi))
 
     for file_path in file_list:
-        out_path = file_path.replace(".pdf", "_compressed.pdf")
+        base, ext = os.path.splitext(file_path)
+        out_path = f"{base}_compressed{ext}"
+
+        counter = 1
+        final_out_path = out_path
+        while os.path.exists(final_out_path):
+            final_out_path = f"{base}_compressed_{counter}{ext}"
+            counter += 1
+
         cmd = [
             "gs", "-sDEVICE=pdfwrite", "-dCompatibilityLevel=1.4",
-            f"-dPDFSETTINGS={gs_quality}", "-dNOPAUSE", "-dQUIET", "-dBATCH",
-            f"-sOutputFile={out_path}", file_path
+            "-dPDFSETTINGS=/ebook",  # Use a base setting
+            f"-dColorImageResolution={dpi_setting}",
+            f"-dGrayImageResolution={dpi_setting}",
+            f"-dMonoImageResolution={dpi_setting}",
+            "-dColorImageDownsampleType=/Bicubic",
+            "-dGrayImageDownsampleType=/Bicubic",
+            "-dMonoImageDownsampleType=/Bicubic",
+            "-dNOPAUSE", "-dQUIET", "-dBATCH",
+            f"-sOutputFile={final_out_path}", file_path
         ]
 
         log_append(log_widget, f"Compressing: {os.path.basename(file_path)}")
 
         try:
-            subprocess.run(cmd, check=True, capture_output=True)
-            log_append(log_widget, f"Saved: {out_path}")
+            # Run Ghostscript
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            log_append(log_widget, f"Saved: {final_out_path}")
+
+            # Delete original if requested and compression was successful
+            if delete_original:
+                try:
+                    os.remove(file_path)
+                    log_append(log_widget, f"Deleted original: {os.path.basename(file_path)}")
+                except OSError as e:
+                    log_append(log_widget, f"Failed to delete {os.path.basename(file_path)}: {e}")
+
         except subprocess.CalledProcessError as e:
-            log_append(log_widget, f"Compression failed: {e}")
+            log_append(log_widget, f"Compression failed for {os.path.basename(file_path)}: {e.stderr}")
         except FileNotFoundError:
             log_append(log_widget, "Ghostscript not found. Install: apt install ghostscript")
             break
@@ -791,7 +811,6 @@ class ConverterApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Universal Converter + Abyss Toolkit")
-        self.geometry("920x780")
         self.minsize(700, 500)
 
         self.last_output = None
@@ -841,7 +860,7 @@ class ConverterApp(tk.Tk):
 
         # Global log
         log_frame = ttk.LabelFrame(self, text="SYSTEM LOG")
-        log_frame.pack(fill='both', expand=False, padx=10, pady=10)
+        log_frame.pack(fill='both', expand=True, padx=10, pady=10)
 
         self.log_widget = scrolledtext.ScrolledText(
             log_frame,
@@ -1171,24 +1190,58 @@ class ConverterApp(tk.Tk):
             for f in files:
                 self.compress_listbox.insert(tk.END, f)
 
+        def add_folder():
+            folder = filedialog.askdirectory(title="Select folder with PDFs")
+            if not folder:
+                return
+
+            log_append(self.log_widget, f"Scanning for PDFs in: {folder}")
+            count = 0
+            for root, _, files in os.walk(folder):
+                for filename in files:
+                    if filename.lower().endswith(".pdf"):
+                        full_path = os.path.join(root, filename)
+                        self.compress_listbox.insert(tk.END, full_path)
+                        count += 1
+            log_append(self.log_widget, f"Added {count} PDF(s) from folder.")
+
         ttk.Button(btn_frame, text="Add Files", command=add_files).pack(side='left', padx=5)
+        ttk.Button(btn_frame, text="Add Folder", command=add_folder).pack(side='left', padx=5)
         ttk.Button(btn_frame, text="Clear List", command=lambda: self.compress_listbox.delete(0, tk.END)).pack(side='left')
 
         # Quality selection
         quality_frame = ttk.Frame(container)
         quality_frame.pack(fill='x', pady=5)
 
-        ttk.Label(quality_frame, text="Compression Quality:").pack(side='left')
-        self.quality_combo = ttk.Combobox(
+        ttk.Label(quality_frame, text="Image DPI (lower is smaller):").pack(side='left')
+        self.dpi_slider = ttk.Scale(
             quality_frame,
-            values=["screen", "ebook", "printer"],
-            state='readonly',
-            width=12
+            from_=72,
+            to=300,
+            orient='horizontal',
+            length=200,
         )
-        self.quality_combo.set("ebook")
-        self.quality_combo.pack(side='left', padx=10)
+        self.dpi_slider.set(150)
+        self.dpi_slider.pack(side='left', padx=10, fill='x', expand=True)
 
-        ttk.Label(quality_frame, text="(screen=lowest quality, printer=highest)").pack(side='left')
+        self.dpi_label = ttk.Label(quality_frame, text="150 DPI", width=8)
+        self.dpi_label.pack(side='left')
+
+        def update_dpi_label(val):
+            self.dpi_label.config(text=f"{int(float(val))} DPI")
+
+        self.dpi_slider.config(command=update_dpi_label)
+
+        # Options frame (for checkbox)
+        options_frame = ttk.Frame(container)
+        options_frame.pack(fill='x', pady=5)
+
+        self.delete_original_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            options_frame,
+            text="Delete original files after compression",
+            variable=self.delete_original_var
+        ).pack(side='left', padx=5)
 
         # Start button
         def start_compress():
@@ -1197,9 +1250,14 @@ class ConverterApp(tk.Tk):
                 messagebox.showwarning("No Files", "Please add PDF files to compress")
                 return
 
-            quality = self.quality_combo.get()
+            delete_original = self.delete_original_var.get()
+            if delete_original:
+                if not messagebox.askyesno("Confirm Delete", "Are you sure you want to permanently delete the original files after compression? This cannot be undone."):
+                    return
+
+            dpi = self.dpi_slider.get()
             threading.Thread(
-                target=lambda: compress_pdf_list(files, quality, self.log_widget),
+                target=lambda: compress_pdf_list(files, dpi, self.log_widget, delete_original),
                 daemon=True
             ).start()
 
