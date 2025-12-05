@@ -816,6 +816,11 @@ class ConverterApp(tk.Tk):
         self.last_output = None
         self._abyss_injected = False
 
+        self.compress_file_count = tk.StringVar(value="Files: 0")
+        self.compress_total_size = tk.StringVar(value="Total Size: 0 MB")
+        self.compress_est_size = tk.StringVar(value="Est. Size: 0 MB")
+        self.compress_est_time = tk.StringVar(value="Est. Time: 0s")
+
         self.create_ui()
         self.after(500, self.inject_abyss_features)
 
@@ -844,11 +849,13 @@ class ConverterApp(tk.Tk):
         self.tab_compress = ttk.Frame(self.notebook)
         self.tab_crack = ttk.Frame(self.notebook)
         self.tab_tools = ttk.Frame(self.notebook)
+        self.tab_update = ttk.Frame(self.notebook)
 
         self.notebook.add(self.tab_convert, text="Convert")
         self.notebook.add(self.tab_compress, text="Compress")
         self.notebook.add(self.tab_crack, text="Crack")
         self.notebook.add(self.tab_tools, text="Tools")
+        # self.notebook.add(self.tab_update, text="Update")
 
         # Build Convert tab
         self.build_convert_tab()
@@ -1145,6 +1152,57 @@ class ConverterApp(tk.Tk):
         # Build Tools tab
         self.build_tools_tab()
 
+        # Build Update tab
+        # self.build_update_tab()
+
+    # def build_update_tab(self):
+    #     """Build Update tab UI."""
+    #     for widget in self.tab_update.winfo_children():
+    #         widget.destroy()
+
+    #     container = ttk.Frame(self.tab_update)
+    #     container.pack(fill='both', expand=True, padx=10, pady=10)
+
+    #     ttk.Label(container, text="Application Self-Update", font=("Arial", 12, "bold")).pack(anchor='w', pady=5)
+    #     ttk.Label(container, text="Check for the latest version on GitHub and update.").pack(anchor='w', padx=10, pady=5)
+
+    #     def start_update():
+    #         if messagebox.askyesno("Confirm Update", "This will download the latest version and replace the current script. Are you sure?"):
+    #             threading.Thread(target=self.update_app, daemon=True).start()
+
+    #     ttk.Button(container, text="Check for Updates", command=start_update).pack(padx=10, pady=10)
+
+    # def update_app(self):
+    #     """Perform self-update."""
+    #     log_append(self.log_widget, "Checking for updates...")
+    #     # IMPORTANT: Replace with the actual URL to the raw script on GitHub
+    #     script_url = "https://raw.githubusercontent.com/your-username/your-repo/main/PDF-toolkit.py"
+
+    #     if not hasattr(sys, "frozen") and not hasattr(sys, "_MEIPASS"):
+    #         # Check if running from a file
+    #         if '__file__' not in globals():
+    #             log_append(self.log_widget, "Update failed: cannot determine script path.")
+    #             messagebox.showerror("Update Failed", "Could not determine the script's file path.")
+    #             return
+
+    #     try:
+    #         import urllib.request
+    #         with urllib.request.urlopen(script_url) as response:
+    #             new_script_content = response.read()
+
+    #         current_script_path = os.path.realpath(__file__)
+
+    #         with open(current_script_path, "wb") as f:
+    #             f.write(new_script_content)
+
+    #         log_append(self.log_widget, "Update successful. Please restart the application.")
+    #         messagebox.showinfo("Update Complete", "Application updated successfully. Please restart the application.")
+    #         self.quit()
+
+    #     except Exception as e:
+    #         log_append(self.log_widget, f"Update failed: {e}")
+    #         messagebox.showerror("Update Failed", f"Could not update the application: {e}")
+
     def update_system_stats(self):
         """Update system statistics."""
         if not PSUTIL_AVAILABLE:
@@ -1159,6 +1217,22 @@ class ConverterApp(tk.Tk):
             pass
 
         self.after(2000, self.update_system_stats)
+
+    def update_compress_stats(self):
+        """Update compression stats based on listbox content."""
+        files = self.compress_listbox.get(0, tk.END)
+        count = len(files)
+        total_size_bytes = sum(os.path.getsize(f) for f in files if os.path.exists(f))
+        total_size_mb = total_size_bytes / (1024 * 1024)
+
+        # Simple estimation logic
+        est_size_mb = total_size_mb * 0.5  # Assume 50% compression
+        est_time_s = total_size_mb * 1.0    # Assume 1 sec per MB
+
+        self.compress_file_count.set(f"Files: {count}")
+        self.compress_total_size.set(f"Total Size: {total_size_mb:.2f} MB")
+        self.compress_est_size.set(f"Est. Size: {est_size_mb:.2f} MB")
+        self.compress_est_time.set(f"Est. Time: {est_time_s:.1f}s")
 
     def build_compress_tab(self):
         """Build Compress tab UI."""
@@ -1189,25 +1263,55 @@ class ConverterApp(tk.Tk):
             files = filedialog.askopenfilenames(title="Select PDF files", filetypes=[("PDF files", "*.pdf")])
             for f in files:
                 self.compress_listbox.insert(tk.END, f)
+            self.update_compress_stats()
 
         def add_folder():
             folder = filedialog.askdirectory(title="Select folder with PDFs")
             if not folder:
                 return
 
-            log_append(self.log_widget, f"Scanning for PDFs in: {folder}")
-            count = 0
-            for root, _, files in os.walk(folder):
-                for filename in files:
-                    if filename.lower().endswith(".pdf"):
-                        full_path = os.path.join(root, filename)
-                        self.compress_listbox.insert(tk.END, full_path)
-                        count += 1
-            log_append(self.log_widget, f"Added {count} PDF(s) from folder.")
+            folders = [folder]
+
+            # Allow selecting multiple folders
+            while True:
+                res = messagebox.askquestion("Add More Folders", "Do you want to add another folder?", icon='question')
+                if res == 'yes':
+                    folder = filedialog.askdirectory(title="Select another folder with PDFs")
+                    if folder:
+                        folders.append(folder)
+                    else:
+                        break
+                else:
+                    break
+
+            for folder in folders:
+                log_append(self.log_widget, f"Scanning for PDFs in: {folder}")
+                count = 0
+                for root, _, files in os.walk(folder):
+                    for filename in files:
+                        if filename.lower().endswith(".pdf"):
+                            full_path = os.path.join(root, filename)
+                            self.compress_listbox.insert(tk.END, full_path)
+                            count += 1
+                log_append(self.log_widget, f"Added {count} PDF(s) from folder.")
+            self.update_compress_stats()
+
+
+        def clear_list():
+            self.compress_listbox.delete(0, tk.END)
+            self.update_compress_stats()
 
         ttk.Button(btn_frame, text="Add Files", command=add_files).pack(side='left', padx=5)
         ttk.Button(btn_frame, text="Add Folder", command=add_folder).pack(side='left', padx=5)
-        ttk.Button(btn_frame, text="Clear List", command=lambda: self.compress_listbox.delete(0, tk.END)).pack(side='left')
+        ttk.Button(btn_frame, text="Clear List", command=clear_list).pack(side='left')
+
+        # Stats bar
+        stats_frame = ttk.Frame(container)
+        stats_frame.pack(fill='x', pady=5)
+        ttk.Label(stats_frame, textvariable=self.compress_file_count).pack(side='left', padx=5)
+        ttk.Label(stats_frame, textvariable=self.compress_total_size).pack(side='left', padx=5)
+        ttk.Label(stats_frame, textvariable=self.compress_est_size).pack(side='left', padx=5)
+        ttk.Label(stats_frame, textvariable=self.compress_est_time).pack(side='left', padx=5)
 
         # Quality selection
         quality_frame = ttk.Frame(container)
