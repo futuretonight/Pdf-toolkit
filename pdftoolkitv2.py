@@ -1,6 +1,5 @@
-#!/usr/bin/env python3
 """
-Universal Converter + Abyss Toolkit  ·  PC Edition
+pdf toolkit V3  ·  PC Edition
 ────────────────────────────────────────────────────
 Full-featured document converter with compression, PDF tools, OCR, and more.
 Supports: CSV, XLSX, DOCX, PDF, Images, TXT
@@ -9,17 +8,6 @@ Requirements (pip install):
     pandas pillow reportlab openpyxl python-docx pdf2image pypdf psutil
     pdfplumber pikepdf docx2pdf tkinterdnd2
     pymupdf pypdfium2 numpy opencv-python
-
-Rendering priority:  PyMuPDF 2192 pypdfium2 2192 pdf2image/poppler
-Restoration pipeline: OpenCV (denoise+CLAHE+sharpen+bilateral) 2192 Pillow fallback
-
-WAS:
-    pdfplumber pikepdf docx2pdf tkinterdnd2
-
-System tools (optional, greatly expand functionality):
-    Windows : install Ghostscript, poppler (choco install ghostscript poppler)
-    macOS   : brew install ghostscript poppler tesseract
-    Linux   : apt install ghostscript poppler-utils tesseract-ocr ocrmypdf
 """
 
 import os
