@@ -2060,6 +2060,8 @@ class PDFViewerPane:
                     "drag_x": None, "drag_y": None}
         self._render_gen   = 0
         self._resize_job   = None   # debounce handle for canvas Configure
+        self._flags        = None   # PDFFlagPanel instance (lives in popup)
+        self._flags_win    = None   # Toplevel popup window
 
         self._thumb_pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="thumb")
@@ -2070,105 +2072,73 @@ class PDFViewerPane:
     # ── UI ────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        outer = tk.PanedWindow(
-            self.frame, orient="horizontal", sashwidth=5,
-            bg=DARK["border"], bd=0, sashrelief="flat")
-        outer.pack(fill="both", expand=True)
+        # ═══════════════════════════════════════════════════════════════
+        #  Adobe Acrobat-style layout
+        #
+        #  ┌─────────────────────────────────────────────────────────┐
+        #  │ TOOLBAR  Open │◄ N/T ►│ − zoom% + Fit ▾ │⚡│⚙│🔤│ … │
+        #  ├─────────┬───────────────────────────────────────────────┤
+        #  │ PAGES   │  HDC info strip (thin, 20 px)                 │
+        #  │[thumb]  │                                               │
+        #  │[thumb]  │         PDF canvas (fills, zoom/pan)          │
+        #  │  …      │                                               │
+        #  └─────────┴───────────────────────────────────────────────┘
+        # ═══════════════════════════════════════════════════════════════
 
-        left       = tk.Frame(outer, bg=DARK["bg"])
-        right_host = tk.Frame(outer, bg=DARK["bg"])
-        outer.add(left,       minsize=self.THUMB_W + 30, width=self.THUMB_W + 34)
-        outer.add(right_host, minsize=320)
+        # ── toolbar ────────────────────────────────────────────────────
+        tb = tk.Frame(self.frame, bg=DARK["panel"], height=38)
+        tb.pack(fill="x")
+        tb.pack_propagate(False)
 
-        # ── vertical split: canvas (top) vs. HDC bar + flag panel (bottom) ──
-        self._vpw = tk.PanedWindow(
-            right_host, orient="vertical", sashwidth=4,
-            bg=DARK["border"], bd=0, sashrelief="flat")
-        self._vpw.pack(fill="both", expand=True)
+        def _btn(text, cmd, **kw):
+            b = ttk.Button(tb, text=text, command=cmd, **kw)
+            b.pack(side="left", padx=2, pady=4)
+            return b
 
-        right    = tk.Frame(self._vpw, bg=DARK["bg"])   # top: nav + canvas
-        self._bot_pane = tk.Frame(self._vpw, bg=DARK["surface"])  # bottom: hdc + flags
-        self._vpw.add(right,          minsize=180, stretch="always")
-        self._vpw.add(self._bot_pane, minsize=50,  height=54, stretch="never")
+        def _sep():
+            ttk.Separator(tb, orient="vertical").pack(
+                side="left", fill="y", padx=5, pady=5)
 
-        # ── thumbnail strip ────────────────────────────────────────────
-        lhdr = tk.Frame(left, bg=DARK["panel"])
-        lhdr.pack(fill="x")
-        tk.Label(lhdr, text="  PAGES", bg=DARK["panel"],
-                 fg=DARK["accent"], font=("Consolas", 8, "bold")
-                 ).pack(side="left", pady=4, padx=4)
-        self._pg_count_lbl = tk.Label(
-            lhdr, text="", bg=DARK["panel"],
-            fg=DARK["text_dim"], font=("Segoe UI", 7))
-        self._pg_count_lbl.pack(side="right", padx=4)
+        # Open
+        _btn("📂 Open", self.open_file)
+        _sep()
 
-        tsf = tk.Frame(left, bg=DARK["bg"])
-        tsf.pack(fill="both", expand=True)
-        self._tc = tk.Canvas(tsf, bg=DARK["bg"],
-                              highlightthickness=0,
-                              width=self.THUMB_W + 26)
-        tsb = ttk.Scrollbar(tsf, orient="vertical",
-                             command=self._tc.yview)
-        self._tc.configure(yscrollcommand=tsb.set)
-        self._tc.pack(side="left", fill="both", expand=True)
-        tsb.pack(side="right", fill="y")
-
-        self._ti = tk.Frame(self._tc, bg=DARK["bg"])
-        self._tw = self._tc.create_window((0, 0), window=self._ti,
-                                           anchor="nw")
-        self._ti.bind("<Configure>",
-                      lambda _e: self._tc.configure(
-                          scrollregion=self._tc.bbox("all")))
-        self._tc.bind("<Configure>",
-                      lambda e: self._tc.itemconfigure(
-                          self._tw, width=e.width))
-        for s in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-            self._tc.bind(s, self._thumb_scroll)
-            self._ti.bind(s, self._thumb_scroll)
-
-        # ── nav bar ────────────────────────────────────────────────────
-        nav = tk.Frame(right, bg=DARK["panel"])
-        nav.pack(fill="x", padx=4, pady=(4, 0))
-
-        def _nb(text, cmd, w=None):
-            kw = {"width": w} if w else {}
-            ttk.Button(nav, text=text, command=cmd, **kw).pack(
-                side="left", padx=1, pady=2)
-
-        _nb("📂 Open", self.open_file)
-        ttk.Separator(nav, orient="vertical").pack(
-            side="left", fill="y", padx=6, pady=3)
-        _nb("◄", lambda: self.goto(self._cur_page - 1), w=2)
-
+        # Navigation
+        _btn("◄", lambda: self.goto(self._cur_page - 1))
         self._page_var = tk.IntVar(value=1)
-        self._spin = ttk.Spinbox(nav, from_=1, to=9999, width=5,
+        self._spin = ttk.Spinbox(tb, from_=1, to=9999, width=4,
                                   textvariable=self._page_var,
-                                  command=lambda: self.goto(
-                                      self._page_var.get()))
-        self._spin.pack(side="left", padx=2)
-        self._spin.bind("<Return>",
-                        lambda _e: self.goto(self._page_var.get()))
-
-        self._total_lbl = tk.Label(nav, text="/ –",
-                                    bg=DARK["panel"], fg=DARK["text_dim"],
-                                    font=("Segoe UI", 8))
+                                  command=lambda: self.goto(self._page_var.get()))
+        self._spin.pack(side="left", padx=2, pady=5)
+        self._spin.bind("<Return>", lambda _e: self.goto(self._page_var.get()))
+        self._total_lbl = tk.Label(tb, text="/ –", bg=DARK["panel"],
+                                    fg=DARK["text_dim"], font=("Segoe UI", 8))
         self._total_lbl.pack(side="left")
-        _nb("►", lambda: self.goto(self._cur_page + 1), w=2)
+        _btn("►", lambda: self.goto(self._cur_page + 1))
+        _sep()
 
-        ttk.Separator(nav, orient="vertical").pack(
-            side="left", fill="y", padx=6, pady=3)
-        _nb("−", lambda: self._zoom_delta(-0.18), w=2)
-        self._zoom_lbl = tk.Label(nav, text="100%",
-                                   bg=DARK["panel"], fg=DARK["accent2"],
+        # Zoom controls
+        _btn("−", lambda: self._zoom_step(-1))
+        self._zoom_lbl = tk.Label(tb, text="100%", bg=DARK["panel"],
+                                   fg=DARK["accent2"],
                                    font=("Consolas", 8, "bold"), width=5)
         self._zoom_lbl.pack(side="left")
-        _nb("+", lambda: self._zoom_delta(+0.18), w=2)
-        _nb("⊡ Fit", self._zoom_fit)
+        _btn("+", lambda: self._zoom_step(+1))
+        _btn("⊡ Fit", self._zoom_fit)
 
-        ttk.Separator(nav, orient="vertical").pack(
-            side="left", fill="y", padx=6, pady=3)
+        # Zoom preset combobox
+        self._zoom_preset = tk.StringVar(value="100%")
+        zm_cb = ttk.Combobox(tb, textvariable=self._zoom_preset,
+                              values=["25%","50%","75%","100%","125%",
+                                      "150%","175%","200%","300%"],
+                              width=6, state="readonly")
+        zm_cb.pack(side="left", padx=(2, 0), pady=5)
+        zm_cb.bind("<<ComboboxSelected>>", self._on_zoom_preset)
+        _sep()
+
+        # Pre-render checkbox
         tk.Checkbutton(
-            nav, text="⚡ Pre-render",
+            tb, text="⚡ Pre-render",
             variable=self._prerender_on,
             command=self._on_prerender_toggle,
             bg=DARK["panel"], fg=DARK["text"],
@@ -2176,17 +2146,83 @@ class PDFViewerPane:
             activebackground=DARK["panel"],
             font=("Segoe UI", 8),
         ).pack(side="left", padx=4)
+        _sep()
 
+        # Structure popup button
+        _btn("⚙ Structure", self._open_flags_popup)
+
+        # OCR button
+        _btn("🔤 OCR", self._do_ocr_current)
+
+        # Status label — fills remaining toolbar width
         self._nav_status = tk.Label(
-            nav, text="  Open a PDF to begin",
+            tb, text="  Open a PDF to begin",
             bg=DARK["panel"], fg=DARK["text_dim"],
-            font=("Consolas", 8))
-        self._nav_status.pack(side="left", padx=6)
+            font=("Consolas", 8), anchor="w")
+        self._nav_status.pack(side="left", fill="x", expand=True, padx=8)
 
-        # ── main canvas ────────────────────────────────────────────────
-        self._cnv = tk.Canvas(right, bg=DARK["log_bg"],
+        # ── body: horizontal PanedWindow ───────────────────────────────
+        body = tk.PanedWindow(
+            self.frame, orient="horizontal", sashwidth=4,
+            bg=DARK["border"], bd=0, sashrelief="flat")
+        body.pack(fill="both", expand=True)
+
+        # ── LEFT: thumbnail strip ──────────────────────────────────────
+        left = tk.Frame(body, bg=DARK["bg"])
+        body.add(left, minsize=self.THUMB_W + 30, width=self.THUMB_W + 34)
+
+        lhdr = tk.Frame(left, bg=DARK["panel"])
+        lhdr.pack(fill="x")
+        tk.Label(lhdr, text="  PAGES", bg=DARK["panel"],
+                 fg=DARK["accent"], font=("Consolas", 8, "bold")
+                 ).pack(side="left", pady=4, padx=4)
+        self._pg_count_lbl = tk.Label(lhdr, text="", bg=DARK["panel"],
+                                       fg=DARK["text_dim"], font=("Segoe UI", 7))
+        self._pg_count_lbl.pack(side="right", padx=4)
+
+        tsf = tk.Frame(left, bg=DARK["bg"])
+        tsf.pack(fill="both", expand=True)
+        self._tc = tk.Canvas(tsf, bg=DARK["bg"],
+                              highlightthickness=0,
+                              width=self.THUMB_W + 26)
+        tsb = ttk.Scrollbar(tsf, orient="vertical", command=self._tc.yview)
+        self._tc.configure(yscrollcommand=tsb.set)
+        self._tc.pack(side="left", fill="both", expand=True)
+        tsb.pack(side="right", fill="y")
+
+        self._ti = tk.Frame(self._tc, bg=DARK["bg"])
+        self._tw = self._tc.create_window((0, 0), window=self._ti, anchor="nw")
+        self._ti.bind("<Configure>",
+                      lambda _e: self._tc.configure(
+                          scrollregion=self._tc.bbox("all")))
+        self._tc.bind("<Configure>",
+                      lambda e: self._tc.itemconfigure(self._tw, width=e.width))
+        for s in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self._tc.bind(s, self._thumb_scroll)
+            self._ti.bind(s, self._thumb_scroll)
+
+        # ── RIGHT: HDC bar + canvas ─────────────────────────────────────
+        right = tk.Frame(body, bg=DARK["bg"])
+        body.add(right, minsize=320)
+
+        # HDC info strip (20 px, above canvas)
+        hbar = tk.Frame(right, bg=DARK["surface"], height=20)
+        hbar.pack(fill="x")
+        hbar.pack_propagate(False)
+        self._hdc_lbl = tk.Label(
+            hbar,
+            text=f"  HDC  ·  {HDC_DIM}-bit  ·  ready",
+            bg=DARK["surface"], fg=DARK["text_dim"],
+            font=("Consolas", 7), anchor="w")
+        self._hdc_lbl.pack(side="left", fill="both", expand=True, padx=4)
+        self._sim_bar = tk.Canvas(hbar, bg=DARK["surface"],
+                                   highlightthickness=0, width=160, height=20)
+        self._sim_bar.pack(side="right", padx=4)
+
+        # Main PDF canvas
+        self._cnv = tk.Canvas(right, bg="#1a1a2e",
                                highlightthickness=0, cursor="crosshair")
-        self._cnv.pack(fill="both", expand=True, padx=4, pady=4)
+        self._cnv.pack(fill="both", expand=True)
 
         for s in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             self._cnv.bind(s, self._wheel)
@@ -2199,27 +2235,6 @@ class PDFViewerPane:
         self._cnv.bind("<Right>", lambda _e: self.goto(self._cur_page + 1))
         self._cnv.bind("<Prior>", lambda _e: self.goto(self._cur_page - 1))
         self._cnv.bind("<Next>",  lambda _e: self.goto(self._cur_page + 1))
-
-        # ── HDC status bar — lives in the guaranteed bottom pane ────────
-        hbar = tk.Frame(self._bot_pane, bg=DARK["surface"], height=22)
-        hbar.pack(fill="x", padx=4, pady=(2, 0))
-        hbar.pack_propagate(False)
-
-        self._hdc_lbl = tk.Label(
-            hbar,
-            text=f"  HDC engine  ·  {HDC_DIM}-bit vectors  ·  "
-                 f"1 KB/page  ·  SQLite cache  ·  ready",
-            bg=DARK["surface"], fg=DARK["text_dim"],
-            font=("Consolas", 7), anchor="w")
-        self._hdc_lbl.pack(side="left", fill="both", expand=True, padx=4)
-
-        self._sim_bar = tk.Canvas(hbar, bg=DARK["surface"],
-                                   highlightthickness=0,
-                                   width=180, height=22)
-        self._sim_bar.pack(side="right", padx=4)
-
-        # ── PDF flag panel — anchored in bottom pane, always visible ────
-        self._flag_panel = PDFFlagPanel(self._bot_pane, self.log, self)
 
     # ── open / index ──────────────────────────────────────────────────
 
@@ -2254,11 +2269,13 @@ class PDFViewerPane:
         self.goto(1, force=True)
         self._start_hdc_build(path)
 
-        # load into flag panel (background — pikepdf open can be slow on big files)
-        threading.Thread(
-            target=lambda: self.frame.after(
-                100, lambda: self._flag_panel.load_pdf(path)),
-            daemon=True).start()
+        # load into flags popup (background — pikepdf open can be slow)
+        if self._flags is not None:
+            p = path
+            threading.Thread(
+                target=lambda: self.frame.after(
+                    100, lambda: self._flags.load_pdf(p)),
+                daemon=True).start()
 
     def _start_hdc_build(self, path):
         if not NUMPY_AVAILABLE:
@@ -2490,6 +2507,11 @@ class PDFViewerPane:
                                 ch // 2 + vp["oy"],
                                 image=photo, anchor="center")
         self._zoom_lbl.config(text=f"{int(vp['zoom']*100)}%")
+        # sync combobox display
+        try:
+            self._zoom_preset.set(f"{int(vp['zoom']*100)}%")
+        except Exception:
+            pass
 
     # ── zoom / pan ────────────────────────────────────────────────────
 
@@ -2513,6 +2535,95 @@ class PDFViewerPane:
     def _zoom_fit(self, *_):
         self._vp.update({"zoom": 1.0, "ox": 0, "oy": 0})
         self._draw_main()
+
+    _ZOOM_STOPS = [0.25, 0.33, 0.50, 0.67, 0.75, 1.0,
+                   1.25, 1.50, 1.75, 2.0, 2.50, 3.0, 4.0]
+
+    def _zoom_step(self, direction):
+        """Step to next/previous zoom stop."""
+        z = self._vp["zoom"]
+        stops = self._ZOOM_STOPS
+        if direction > 0:
+            nxt = [s for s in stops if s > z + 0.01]
+            self._vp["zoom"] = nxt[0] if nxt else stops[-1]
+        else:
+            prv = [s for s in stops if s < z - 0.01]
+            self._vp["zoom"] = prv[-1] if prv else stops[0]
+        self._draw_main()
+        # sync combobox
+        pct = f"{int(self._vp['zoom'] * 100)}%"
+        self._zoom_preset.set(pct if pct in self._zoom_preset._tk else self._zoom_preset.get())
+
+    def _on_zoom_preset(self, _e=None):
+        val = self._zoom_preset.get().strip().rstrip("%")
+        try:
+            self._vp["zoom"] = max(0.05, min(20.0, int(val) / 100))
+            self._vp["ox"] = self._vp["oy"] = 0
+            self._draw_main()
+        except ValueError:
+            pass
+
+    def _open_flags_popup(self):
+        """Create or raise the Structure & Flags popup window."""
+        if self._flags_win is not None:
+            try:
+                if self._flags_win.winfo_exists():
+                    self._flags_win.lift()
+                    self._flags_win.focus_force()
+                    return
+            except Exception:
+                pass
+
+        win = tk.Toplevel(self.frame)
+        win.title("PDF Structure & Flags")
+        win.geometry("720x560")
+        win.configure(bg=DARK["bg"])
+        win.protocol("WM_DELETE_WINDOW", lambda: self._close_flags_popup(win))
+
+        self._flags_win = win
+        self._flags     = PDFFlagPanel(win, self.log)
+
+        # if a file is already open, load it immediately
+        if self._path and os.path.exists(self._path):
+            p = self._path
+            threading.Thread(
+                target=lambda: win.after(150, lambda: self._flags.load_pdf(p)),
+                daemon=True).start()
+
+    def _close_flags_popup(self, win):
+        self._flags_win = None
+        self._flags     = None
+        win.destroy()
+
+    def _do_ocr_current(self):
+        """Run ocrmypdf on the currently open PDF."""
+        if not self._path:
+            messagebox.showinfo("No File", "Open a PDF first.")
+            return
+        if not shutil.which("ocrmypdf"):
+            messagebox.showerror(
+                "OCR Missing",
+                "ocrmypdf not found.\n\npip install ocrmypdf\n"
+                "(also requires system tesseract)")
+            return
+        out = self._path.replace(".pdf", "_ocr.pdf")
+        if os.path.exists(out):
+            from tkinter import messagebox as mb
+            if not mb.askyesno("Overwrite?",
+                                f"Output already exists:\n{out}\nOverwrite?"):
+                return
+        self._set_status("OCR running…", DARK["accent2"])
+
+        def _worker():
+            try:
+                run_ocrmypdf(self._path, out, self.log)
+                self.frame.after(0, lambda: self._set_status(
+                    f"OCR done → {os.path.basename(out)}", DARK["success"]))
+            except Exception as exc:
+                self.frame.after(0, lambda: self._set_status(
+                    f"OCR failed: {exc}", DARK["danger"]))
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _drag_start(self, e):
         self._vp["drag_x"] = e.x;  self._vp["drag_y"] = e.y
@@ -2890,96 +3001,50 @@ class PDFRepairEngine:
 
 
 # =====================================================================
-#  FLAG INSPECTOR WIDGET  —  embedded inside PDFViewerPane
+#  FLAG INSPECTOR WIDGET  —  pops out as a Toplevel from the viewer
 # =====================================================================
 
 class PDFFlagPanel:
-    """Collapsible bottom panel inside PDFViewerPane.
+    """PDF Structure & Flags inspector.
+
+    Built inside whatever `parent` frame is given — call from a
+    Toplevel so it works as a free-floating popup.
 
     Four tabs:
       XREF / Health  — triage results + repair button
       Permissions    — checkbox grid for all 8 permission bits
-      Objects        — scrollable table of every PDF object
-      Metadata       — /Info dict editor + filter map
+      Objects        — scrollable treeview of every PDF object
+      Metadata       — /Info dict editor + stream filter map
     """
 
-    PANEL_H = 220    # collapsed → 28, expanded → PANEL_H
+    def __init__(self, parent, log_widget):
+        self._log        = log_widget
+        self._engine     = None
+        self._perm_vars  = {}
 
-    def __init__(self, parent, log_widget, viewer_pane):
-        self._log    = log_widget
-        self._viewer = viewer_pane
-        self._engine = None          # PDFRepairEngine once opened
-        self._perm_vars = {}         # {bit: tk.BooleanVar}
-        self._expanded  = False
-
-        # ── outer collapsible frame ───────────────────────────────────
-        self.outer = tk.Frame(parent, bg=DARK["surface"])
-        self.outer.pack(fill="both", expand=True, padx=4, pady=(0, 4))
-
-        # toggle header
-        hdr = tk.Frame(self.outer, bg=DARK["surface"], height=28)
+        # ── header strip with file name + health badge ───────────────
+        hdr = tk.Frame(parent, bg=DARK["panel"], height=30)
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
 
-        self._toggle_lbl = tk.Label(
-            hdr, text="▶  PDF Structure & Flags",
-            bg=DARK["surface"], fg=DARK["accent"],
-            font=("Consolas", 8, "bold"), anchor="w", cursor="hand2")
-        self._toggle_lbl.pack(side="left", fill="x", expand=True, padx=8)
-        self._toggle_lbl.bind("<Button-1>", lambda _e: self.toggle())
+        self._file_lbl = tk.Label(hdr, text="  No file open",
+                                   bg=DARK["panel"], fg=DARK["text_dim"],
+                                   font=("Consolas", 8), anchor="w")
+        self._file_lbl.pack(side="left", fill="x", expand=True, padx=6)
 
-        self._health_badge = tk.Label(
-            hdr, text="  no file  ",
-            bg=DARK["surface"], fg=DARK["text_dim"],
-            font=("Consolas", 7))
+        self._health_badge = tk.Label(hdr, text="  —  ",
+                                       bg=DARK["panel"], fg=DARK["text_dim"],
+                                       font=("Consolas", 8, "bold"))
         self._health_badge.pack(side="right", padx=8)
 
-        # collapsible body — fill=both so notebook uses all available pane height
-        self._body = tk.Frame(self.outer, bg=DARK["bg"])
-        # body is NOT packed initially — toggled on demand
-
-        # notebook inside body
-        self._nb = ttk.Notebook(self._body)
+        # ── notebook (fills rest of parent) ──────────────────────────
+        self._nb = ttk.Notebook(parent)
         self._nb.pack(fill="both", expand=True, padx=4, pady=4)
 
         self._build_xref_tab()
         self._build_perm_tab()
         self._build_objects_tab()
         self._build_meta_tab()
-
-    # ── collapse / expand ────────────────────────────────────────────
-
-    _VPW_EXPANDED_H = 260   # bot_pane height when panel is open
-
-    def toggle(self):
-        self._expanded = not self._expanded
-        if self._expanded:
-            self._body.pack(fill="both", expand=True)
-            self._toggle_lbl.config(text="▼  PDF Structure & Flags")
-            # grow the bottom pane by moving the sash
-            try:
-                vpw = self._viewer.frame.nametowidget(
-                    self._viewer._vpw.winfo_pathname(
-                        self._viewer._vpw.winfo_id()))
-            except Exception:
-                vpw = None
-            if vpw is None:
-                vpw = self._viewer._vpw
-            try:
-                total = vpw.winfo_height()
-                vpw.sash_place(0, 0,
-                               max(60, total - self._VPW_EXPANDED_H))
-            except Exception:
-                pass
-        else:
-            self._body.pack_forget()
-            self._toggle_lbl.config(text="▶  PDF Structure & Flags")
-            try:
-                vpw = self._viewer._vpw
-                total = vpw.winfo_height()
-                vpw.sash_place(0, 0, max(60, total - 54))
-            except Exception:
-                pass
 
     # ── XREF / Health tab ────────────────────────────────────────────
 
@@ -3176,23 +3241,32 @@ class PDFFlagPanel:
                                         font=("Segoe UI", 8))
         self._obj_count_lbl.pack(side="left", padx=8)
 
-        # treeview
+        # treeview + both scrollbars in a sub-frame
+        tree_frame = tk.Frame(tab, bg=DARK["bg"])
+        tree_frame.pack(fill="both", expand=True, padx=6, pady=(0, 4))
+
         cols = ("objnum", "type", "size")
         self._obj_tree = ttk.Treeview(
-            tab, columns=cols, show="headings", height=6)
+            tree_frame, columns=cols, show="headings", height=6)
         for col, hdr, w in zip(cols,
                                 ("Obj #", "Type / Subtype", "Stream bytes"),
                                 (70, 240, 100)):
             self._obj_tree.heading(col, text=hdr,
                                     command=lambda c=col: self._obj_sort(c))
             self._obj_tree.column(col, width=w, anchor="w")
-        self._obj_tree.pack(fill="both", expand=True, padx=6, pady=(0, 4))
 
-        obj_sb = ttk.Scrollbar(tab, orient="vertical",
-                                command=self._obj_tree.yview)
-        self._obj_tree.configure(yscrollcommand=obj_sb.set)
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical",
+                             command=self._obj_tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal",
+                             command=self._obj_tree.xview)
+        self._obj_tree.configure(yscrollcommand=vsb.set,
+                                  xscrollcommand=hsb.set)
 
-        self._obj_rows = []    # full list, cached for filtering
+        vsb.pack(side="right",  fill="y")
+        hsb.pack(side="bottom", fill="x")
+        self._obj_tree.pack(fill="both", expand=True)
+
+        self._obj_rows = []
 
     def _load_objects(self):
         self._obj_rows = self._engine.get_object_summary() \
@@ -3229,6 +3303,7 @@ class PDFFlagPanel:
         tab = ttk.Frame(self._nb)
         self._nb.add(tab, text="📋 Metadata")
 
+        # action buttons (fixed, not scrolled)
         top = ttk.Frame(tab)
         top.pack(fill="x", padx=6, pady=4)
         ttk.Button(top, text="💾 Save changes",
@@ -3236,34 +3311,39 @@ class PDFFlagPanel:
         ttk.Button(top, text="✕ Clear all metadata",
                    command=self._meta_clear).pack(side="left")
 
-        # filter map
-        fmap_lbl = tk.Label(tab, text="  Stream filters:",
-                             bg=DARK["bg"], fg=DARK["text_dim"],
-                             font=("Consolas", 8))
-        fmap_lbl.pack(anchor="w", padx=6)
-        self._fmap_lbl = tk.Label(tab, text="",
-                                   bg=DARK["bg"], fg=DARK["accent2"],
-                                   font=("Consolas", 8), anchor="w")
-        self._fmap_lbl.pack(fill="x", padx=14)
+        # scrollable body for all fields
+        sf = ScrollableFrame(tab)
+        sf.pack(fill="both", expand=True)
+        body = sf.inner
 
-        ttk.Separator(tab, orient="horizontal").pack(
+        # filter map
+        tk.Label(body, text="  Stream filters:",
+                 bg=DARK["bg"], fg=DARK["text_dim"],
+                 font=("Consolas", 8)).pack(anchor="w", padx=6, pady=(4, 0))
+        self._fmap_lbl = tk.Label(body, text="",
+                                   bg=DARK["bg"], fg=DARK["accent2"],
+                                   font=("Consolas", 8), anchor="w",
+                                   wraplength=400, justify="left")
+        self._fmap_lbl.pack(fill="x", padx=14, pady=(0, 4))
+
+        ttk.Separator(body, orient="horizontal").pack(
             fill="x", padx=6, pady=4)
 
         # /Info fields grid
         self._meta_entries = {}
         fields = ["/Title", "/Author", "/Subject", "/Keywords",
                   "/Creator", "/Producer", "/CreationDate", "/ModDate"]
-        meta_grid = ttk.Frame(tab)
-        meta_grid.pack(fill="x", padx=6)
+        meta_grid = ttk.Frame(body)
+        meta_grid.pack(fill="x", padx=6, pady=(0, 8))
         meta_grid.columnconfigure(1, weight=1)
         for row, key in enumerate(fields):
             tk.Label(meta_grid, text=f"{key}:",
                      bg=DARK["bg"], fg=DARK["text_dim"],
                      font=("Consolas", 8), width=14, anchor="e").grid(
                          row=row, column=0, sticky="e", padx=(0, 6),
-                         pady=1)
+                         pady=2)
             ent = ttk.Entry(meta_grid)
-            ent.grid(row=row, column=1, sticky="ew", pady=1)
+            ent.grid(row=row, column=1, sticky="ew", pady=2)
             self._meta_entries[key] = ent
 
     def _load_metadata(self):
@@ -3307,14 +3387,15 @@ class PDFFlagPanel:
     # ── Called by PDFViewerPane on open ──────────────────────────────
 
     def load_pdf(self, path, password=""):
-        """Open or re-open a PDF into the engine.  Called from viewer."""
+        """Open or re-open a PDF into the engine."""
         if self._engine:
             self._engine.close()
         self._engine = PDFRepairEngine(path)
         pw = password or self._pw_entry.get().strip()
         ok, msg = self._engine.open(pw)
         log_append(self._log,
-                   f"FlagPanel: {msg}", "success" if ok else "warn")
+                   f"Structure: {msg}", "success" if ok else "warn")
+        self._file_lbl.config(text=f"  {os.path.basename(path)}")
         if ok:
             self._do_triage()
             self._load_permissions()
@@ -3837,15 +3918,9 @@ class ConverterApp(TkBase):
         sep = tk.Frame(self, bg=DARK["border"], height=1)
         sep.pack(fill="x")
 
-        # ── Notebook ────────────────────────────────────────────────
-        main_pane = tk.PanedWindow(
-            self, orient="vertical", sashwidth=6, bg=DARK["border"], bd=0,
-            sashrelief="flat")
-        main_pane.pack(fill="both", expand=True, padx=6, pady=6)
-        self.main_pane = main_pane
-
-        nb = ttk.Notebook(main_pane)
-        main_pane.add(nb, minsize=360)
+        # ── Notebook (fills window — System Log lives in the Tools tab) ──
+        nb = ttk.Notebook(self)
+        nb.pack(fill="both", expand=True, padx=6, pady=(0, 6))
         self.nb = nb
 
         self._tabs = {}
@@ -3867,15 +3942,9 @@ class ConverterApp(TkBase):
             nb.add(frame, text=label)
             self._tabs[key] = frame
 
-        # ── Log area ────────────────────────────────────────────────
-        log_outer = tk.Frame(main_pane, bg=DARK["panel"])
-        main_pane.add(log_outer, minsize=170)
-
-        tk.Label(log_outer, text="  SYSTEM LOG", bg=DARK["panel"],
-                 fg=DARK["accent"], font=("Consolas", 8, "bold")).pack(anchor="w")
-
-        self.log_widget = make_log(log_outer)
-        self.log_widget.pack(fill="both", expand=True, padx=4, pady=(2, 4))
+        # log_widget is created here so all tab builders can reference it,
+        # but its geometry is managed inside _build_tools_tab (pack in_= bot).
+        self.log_widget = make_log(self._tabs["tools"])
 
         # ── Build each tab ──────────────────────────────────────────
         self._build_convert_tab()
@@ -5597,36 +5666,26 @@ class ConverterApp(TkBase):
 
     def _build_tools_tab(self):
         tab = self._tabs["tools"]
-        f   = ttk.Frame(tab)
-        f.pack(fill="both", expand=True, padx=14, pady=14)
 
-        ttk.Label(f, text="Tools & Info", style="Section.TLabel").pack(anchor="w", pady=(0,10))
+        # ── vertical split: tools info (top) | system log (bottom) ─────
+        vpw = tk.PanedWindow(tab, orient="vertical", sashwidth=5,
+                              bg=DARK["border"], bd=0, sashrelief="flat")
+        vpw.pack(fill="both", expand=True)
 
-        # ── OCR ──────────────────────────────────────────────────────
-        ocr_lf = ttk.LabelFrame(f, text="OCR — Make Scanned PDF Searchable")
-        ocr_lf.pack(fill="x", pady=6)
+        # ── TOP: scrollable tools panel ─────────────────────────────────
+        top = ttk.Frame(vpw)
+        vpw.add(top, minsize=200, stretch="always")
 
-        def _do_ocr():
-            src = filedialog.askopenfilename(filetypes=[("PDF","*.pdf")])
-            if not src: return
-            out = src.replace(".pdf", "_ocr.pdf")
-            def worker():
-                try:
-                    run_ocrmypdf(src, out, self.log_widget)
-                    self.last_output = out
-                    self._show_info("Done", f"OCR PDF:\n{out}")
-                except Exception as e:
-                    self._show_error("OCR Failed", str(e))
-            self._run(worker)
+        sf = ScrollableFrame(top)
+        sf.pack(fill="both", expand=True)
+        f = sf.inner
 
-        ttk.Label(ocr_lf,
-                  text="Needs: pip install ocrmypdf  +  system tesseract",
-                  style="Dim.TLabel").pack(anchor="w", padx=10, pady=(6,0))
-        ttk.Button(ocr_lf, text="Run OCR on PDF", command=_do_ocr).pack(anchor="w", padx=10, pady=8)
+        ttk.Label(f, text="Tools & Info",
+                  style="Section.TLabel").pack(anchor="w", padx=14, pady=(10, 6))
 
         # ── Package status ───────────────────────────────────────────
         pkg_lf = ttk.LabelFrame(f, text="Package Status")
-        pkg_lf.pack(fill="x", pady=6)
+        pkg_lf.pack(fill="x", padx=14, pady=6)
 
         pkgs = [
             ("pandas",      pd is not None,       "pip install pandas"),
@@ -5641,26 +5700,46 @@ class ConverterApp(TkBase):
             ("docx2pdf",    DOCX2PDF_AVAILABLE,    "pip install docx2pdf"),
             ("psutil",      PSUTIL_AVAILABLE,      "pip install psutil"),
             ("tkinterdnd2", DND_AVAILABLE,         "pip install tkinterdnd2"),
+            ("ocrmypdf",    bool(__import__("shutil").which("ocrmypdf")),
+                            "pip install ocrmypdf  (+ tesseract)"),
         ]
-        grid = ttk.Frame(pkg_lf)
-        grid.pack(fill="x", padx=10, pady=8)
-
+        pgrid = ttk.Frame(pkg_lf)
+        pgrid.pack(fill="x", padx=10, pady=8)
         for i, (name, ok, install) in enumerate(pkgs):
             row, col = divmod(i, 2)
             color = DARK["success"] if ok else DARK["danger"]
             mark  = "✓" if ok else "✗"
             tip   = "" if ok else f"  →  {install}"
-            tk.Label(grid, text=f"{mark}  {name}{tip}",
+            tk.Label(pgrid, text=f"{mark}  {name}{tip}",
                      bg=DARK["bg"], fg=color,
                      font=("Consolas", 9)).grid(
                          row=row, column=col, sticky="w", padx=12, pady=2)
 
         # ── Open last output ─────────────────────────────────────────
-        ttk.Button(f, text="Reveal Last Output in Explorer",
+        ttk.Button(f, text="📁  Reveal Last Output in Explorer",
                    command=lambda: (open_path(self.last_output)
                                     if self.last_output else
-                                    self._show_info("Nothing", "No output yet."))).pack(
-                                        anchor="w", pady=10)
+                                    self._show_info("Nothing", "No output yet."))
+                   ).pack(anchor="w", padx=14, pady=10)
+
+        # ── BOTTOM: System Log ──────────────────────────────────────────
+        bot = tk.Frame(vpw, bg=DARK["panel"])
+        vpw.add(bot, minsize=160, height=220, stretch="never")
+
+        lhdr = tk.Frame(bot, bg=DARK["panel"])
+        lhdr.pack(fill="x", padx=4, pady=(4, 0))
+        tk.Label(lhdr, text="  SYSTEM LOG", bg=DARK["panel"],
+                 fg=DARK["accent"],
+                 font=("Consolas", 8, "bold")).pack(side="left")
+        ttk.Button(lhdr, text="Clear",
+                   command=lambda: (self.log_widget.configure(state="normal"),
+                                    self.log_widget.delete("1.0", "end"),
+                                    self.log_widget.configure(state="disabled"))
+                   ).pack(side="right", padx=4)
+
+        # Re-parent log_widget display into the bot frame via pack in_=
+        self.log_widget.pack(in_=bot, fill="both", expand=True,
+                              padx=4, pady=(2, 4))
 
     # ================================================================
     #  HELPERS
