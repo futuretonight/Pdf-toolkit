@@ -29,12 +29,43 @@ All notable changes to this project will be documented in this file.
     - **Mask Presets:** Quick-action buttons for common patterns (e.g., 8-char brute force, `Cap+5lower+2digit`, `6-digits`).
     - **Dependency Badges:** Visual `✓/✗` status indicators for `john`, `hashcat`, and `pdf2john` in the header.
 
+- **PDFRepairEngine (Forensic Recovery)**
+    - **Heuristic Rebuilding:** Integrated `pikepdf` recovery mode (`attempt_recovery=True`). The engine now performs a full binary scan for `obj` headers to rebuild corrupted XREF tables, allowing access to files that fail to open in standard viewers.
+    - **Deep Triage System:** Automated scanning for linearization errors, object number gaps (truncation detection), and structural warnings.
+    - **Orphan Analysis:** Implemented a Depth-First Search (DFS) walker starting from the `/Root` catalog. It identifies and quantifies "orphan" objects that are unreachable via the object graph, enabling cleaner, smaller file saves.
+    - **Stream Intelligence:** Added a filter summary tool that tallies stream types (e.g., `FlateDecode`, `DCTDecode`), providing a high-level view of text vs. image data density.
+
+- **PDFFlagPanel (Inspection & Modification UI)**
+    - Added a collapsible, multi-tabbed diagnostic panel located below the main HDC bar, featuring a real-time "Health Badge" in the header.
+    - **⚕ Health / XREF Tab:** 
+        - Visual triage report with color-coded severity icons.
+        - "Repair & Save" workflow to export recovered versions of damaged documents.
+        - Owner-level password support for triaging encrypted streams.
+    - **🔒 Permissions Tab:** 
+        - Full exposure of the 32-bit `/P` integer field via ISO 32000-1 compliant checkboxes.
+        - Granular control over Print (Low/High), Modify, Copy, Annotate, Form Fill, and Accessibility flags.
+        - "Unlock All" / "Lock All" macros for rapid restriction stripping.
+        - Live Binary/Hex preview of the `/P` field for cryptographic verification.
+    - **🗂 Objects Tab:** 
+        - Searchable `ttk.Treeview` listing every object, its type, subtype, and byte count.
+        - Real-time type-filtering (e.g., "Image", "Font") and clickable column headers for sorting.
+    - **📋 Metadata Tab:** 
+        - Editable interface for the eight primary `/Info` fields.
+        - "Privacy Scrub" feature: One-click metadata wiping to sanitize documents before distribution.
+
 ### Changed
 - **Session Handling:** Moved to a robust `--session` and `--restore` system. The UI now includes a dedicated "Restore" checkbox to resume interrupted jobs using JtR `.rec` files.
 - **Security:** Temporary files are no longer stored in the source directory to prevent clutter and accidental data exposure.
 - **Progress Monitoring:** Refined the "Stop" process with a confirmation dialog explaining how session files preserve progress.
+- **Optimization:** The PDFFlagPanel now initializes in a background thread with a 100ms delay after file load, ensuring heavy object-graph walking never blocks the primary page rendering or UI responsiveness.
+- **Saving Logic:** 
+    - Default saving now disables linearization (`linearize=False`) for cleaner surgical edits.
+    - Enabled `ObjectStreamMode.generate` by default to re-pack compressed streams and resolve stream-level corruption during export.
 
 ### Fixed
 - Fixed issue where the UI would hang during long-running shell executions.
 - Resolved pathing issues on Windows when calling Perl-based `pdf2john` scripts.
 - Corrected hashcat mode mapping for Acrobat 9/X/XI (AES-256) files.
+- Resolved UI "freezing" when opening large PDFs with deep object nesting.
+- Fixed a bug where files with broken XREF trailers would fail to load despite containing valid object data.
+- Many other bug fixes.
