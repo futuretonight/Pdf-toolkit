@@ -2057,7 +2057,7 @@ class PDFViewerPane:
         self._index_cancel = threading.Event()
         self._prerender_on = tk.BooleanVar(value=False)
         self._vp = {"zoom": 1.0, "ox": 0, "oy": 0,
-                    "drag_x": None, "drag_y": None}
+                    "drag_x": None, "drag_y": None, "vis_scale": 1.0}
         self._render_gen   = 0
         self._resize_job   = None   # debounce handle for canvas Configure
         self._flags        = None   # PDFFlagPanel instance (lives in popup)
@@ -2485,6 +2485,7 @@ class PDFViewerPane:
             DARK["success"])
 
     def _draw_main(self):
+        """Phase-2: full crisp LANCZOS render. Called after debounce settles."""
         img = self._pil_main
         if img is None or not self._cnv.winfo_exists():
             return
@@ -2495,75 +2496,155 @@ class PDFViewerPane:
         total = base * vp["zoom"]
         nw = max(1, int(img.width  * total))
         nh = max(1, int(img.height * total))
-        rsmp = Image.LANCZOS
         try:
             from PIL import ImageTk
-            photo = ImageTk.PhotoImage(img.resize((nw, nh), rsmp))
+            photo = ImageTk.PhotoImage(img.resize((nw, nh), Image.LANCZOS))
         except Exception:
             return
         self._photo_main = photo
+        # reset any pending visual scale accumulator
+        vp["vis_scale"] = 1.0
+
         self._cnv.delete("all")
-        self._cnv.create_image(cw // 2 + vp["ox"],
-                                ch // 2 + vp["oy"],
-                                image=photo, anchor="center")
-        self._zoom_lbl.config(text=f"{int(vp['zoom']*100)}%")
-        # sync combobox display
+        self._cnv.create_image(
+            cw // 2 + vp["ox"],
+            ch // 2 + vp["oy"],
+            image=photo, anchor="center", tags=("page_img",))
+
+        pct = f"{int(vp['zoom'] * 100)}%"
+        self._zoom_lbl.config(text=pct)
         try:
-            self._zoom_preset.set(f"{int(vp['zoom']*100)}%")
+            self._zoom_preset.set(pct)
         except Exception:
             pass
+
+    def _phase1_zoom(self, cx, cy, s):
+        """Phase-1: instant visual scale around canvas point (cx, cy).
+        Zero PIL work — just a canvas matrix transform in C.
+        Schedules phase-2 (crisp redraw) after RENDER_DELAY ms of inactivity.
+        """
+        vp = self._vp
+        # scale the existing canvas item around the mouse point
+        self._cnv.scale("page_img", cx, cy, s, s)
+        # track accumulated visual scale so phase-2 fires correctly
+        vp["vis_scale"] = vp.get("vis_scale", 1.0) * s
+        # update logical vp so phase-2 produces the right position
+        vp["zoom"] = max(0.05, min(20.0, vp["zoom"] * s))
+        # zoom-around-point: keep the pixel under (cx,cy) fixed
+        img_cx = self._cnv.winfo_width()  // 2 + vp["ox"]
+        img_cy = self._cnv.winfo_height() // 2 + vp["oy"]
+        vp["ox"] = int(cx + s * (img_cx - cx) - self._cnv.winfo_width()  // 2)
+        vp["oy"] = int(cy + s * (img_cy - cy) - self._cnv.winfo_height() // 2)
+        # update zoom label live (cheap)
+        self._zoom_lbl.config(text=f"{int(vp['zoom'] * 100)}%")
+        self._schedule_render()
+
+    def _phase1_pan(self, dx, dy):
+        """Phase-1: instant pan via canvas.move — no PIL involved."""
+        self._cnv.move("page_img", dx, dy)
+        self._vp["ox"] += dx
+        self._vp["oy"] += dy
+        self._schedule_render()
+
+    RENDER_DELAY = 120   # ms idle before phase-2 fires
+
+    def _schedule_render(self):
+        """Cancel any pending phase-2 and reschedule."""
+        if self._resize_job is not None:
+            try:
+                self._cnv.after_cancel(self._resize_job)
+            except Exception:
+                pass
+        self._resize_job = self._cnv.after(self.RENDER_DELAY, self._commit_render)
+
+    def _commit_render(self):
+        self._resize_job = None
+        self._draw_main()
 
     # ── zoom / pan ────────────────────────────────────────────────────
 
     def _wheel(self, event):
-        if event.num == 4:    f = 1.12
-        elif event.num == 5:  f = 1/1.12
-        elif event.delta > 0: f = 1.12
-        else:                 f = 1/1.12
-        vp = self._vp
-        nz = max(0.05, min(20.0, vp["zoom"] * f))
-        s  = nz / vp["zoom"]
-        vp["ox"] = int(event.x - s * (event.x - vp["ox"]))
-        vp["oy"] = int(event.y - s * (event.y - vp["oy"]))
-        vp["zoom"] = nz
-        self._draw_main()
+        if   event.num == 4:    f = 1.12
+        elif event.num == 5:    f = 1 / 1.12
+        elif event.delta > 0:   f = 1.12
+        else:                   f = 1 / 1.12
+        self._phase1_zoom(event.x, event.y, f)
 
     def _zoom_delta(self, d):
-        self._vp["zoom"] = max(0.05, min(20.0, self._vp["zoom"] + d))
-        self._draw_main()
+        """Button-triggered zoom — phase1 around canvas centre."""
+        cw = self._cnv.winfo_width()  // 2
+        ch = self._cnv.winfo_height() // 2
+        old = self._vp["zoom"]
+        new = max(0.05, min(20.0, old + d))
+        self._phase1_zoom(cw, ch, new / old)
 
     def _zoom_fit(self, *_):
-        self._vp.update({"zoom": 1.0, "ox": 0, "oy": 0})
-        self._draw_main()
+        self._vp.update({"zoom": 1.0, "ox": 0, "oy": 0, "vis_scale": 1.0})
+        self._draw_main()          # fit is a deliberate action — go crisp immediately
 
     _ZOOM_STOPS = [0.25, 0.33, 0.50, 0.67, 0.75, 1.0,
                    1.25, 1.50, 1.75, 2.0, 2.50, 3.0, 4.0]
 
     def _zoom_step(self, direction):
-        """Step to next/previous zoom stop."""
-        z = self._vp["zoom"]
+        cw = self._cnv.winfo_width()  // 2
+        ch = self._cnv.winfo_height() // 2
+        z  = self._vp["zoom"]
         stops = self._ZOOM_STOPS
         if direction > 0:
             nxt = [s for s in stops if s > z + 0.01]
-            self._vp["zoom"] = nxt[0] if nxt else stops[-1]
+            nz  = nxt[0] if nxt else stops[-1]
         else:
             prv = [s for s in stops if s < z - 0.01]
-            self._vp["zoom"] = prv[-1] if prv else stops[0]
-        self._draw_main()
-        # sync combobox
-        pct = f"{int(self._vp['zoom'] * 100)}%"
-        self._zoom_preset.set(pct if pct in self._zoom_preset._tk else self._zoom_preset.get())
+            nz  = prv[-1] if prv else stops[0]
+        self._phase1_zoom(cw, ch, nz / z)
 
     def _on_zoom_preset(self, _e=None):
         val = self._zoom_preset.get().strip().rstrip("%")
         try:
-            self._vp["zoom"] = max(0.05, min(20.0, int(val) / 100))
-            self._vp["ox"] = self._vp["oy"] = 0
-            self._draw_main()
-        except ValueError:
+            nz = max(0.05, min(20.0, int(val) / 100))
+            cw = self._cnv.winfo_width()  // 2
+            ch = self._cnv.winfo_height() // 2
+            self._phase1_zoom(cw, ch, nz / self._vp["zoom"])
+        except (ValueError, ZeroDivisionError):
             pass
 
-    def _open_flags_popup(self):
+    def _drag_start(self, e):
+        self._vp["drag_x"] = e.x
+        self._vp["drag_y"] = e.y
+        self._cnv.configure(cursor="fleur")
+        self._cnv.focus_set()
+
+    def _drag_move(self, e):
+        vp = self._vp
+        if vp["drag_x"] is None:
+            return
+        dx = e.x - vp["drag_x"]
+        dy = e.y - vp["drag_y"]
+        vp["drag_x"] = e.x
+        vp["drag_y"] = e.y
+        self._phase1_pan(dx, dy)   # instant move, crisp render on release
+
+    def _drag_end(self, _e):
+        self._vp["drag_x"] = self._vp["drag_y"] = None
+        self._cnv.configure(cursor="crosshair")
+        # fire crisp render immediately on mouse-up
+        if self._resize_job is not None:
+            try:
+                self._cnv.after_cancel(self._resize_job)
+            except Exception:
+                pass
+        self._resize_job = None
+        self._draw_main()
+
+    def _on_cnv_configure(self, _e):
+        # window resize — debounce only (no phase-1 canvas.scale needed)
+        self._schedule_render()
+
+    def _on_resize_done(self):
+        # kept for compatibility — calls come through _commit_render now
+        self._resize_job = None
+        if self._pil_main:
+            self._zoom_fit()
         """Create or raise the Structure & Flags popup window."""
         if self._flags_win is not None:
             try:
@@ -2624,38 +2705,6 @@ class PDFViewerPane:
                     f"OCR failed: {exc}", DARK["danger"]))
 
         threading.Thread(target=_worker, daemon=True).start()
-
-    def _drag_start(self, e):
-        self._vp["drag_x"] = e.x;  self._vp["drag_y"] = e.y
-        self._cnv.configure(cursor="fleur")
-        self._cnv.focus_set()
-
-    def _drag_move(self, e):
-        vp = self._vp
-        if vp["drag_x"] is None: return
-        vp["ox"] += e.x - vp["drag_x"];  vp["drag_x"] = e.x
-        vp["oy"] += e.y - vp["drag_y"];  vp["drag_y"] = e.y
-        self._draw_main()
-
-    def _drag_end(self, _e):
-        self._vp["drag_x"] = self._vp["drag_y"] = None
-        self._cnv.configure(cursor="crosshair")
-
-    def _on_cnv_configure(self, _e):
-        # Debounce: cancel any pending redraw and reschedule 80 ms out.
-        # This prevents a flood of full PIL resize+PhotoImage operations
-        # during every pixel of window drag (the jitter fix).
-        if self._resize_job is not None:
-            try:
-                self._cnv.after_cancel(self._resize_job)
-            except Exception:
-                pass
-        self._resize_job = self._cnv.after(80, self._on_resize_done)
-
-    def _on_resize_done(self):
-        self._resize_job = None
-        if self._pil_main:
-            self._zoom_fit()
 
     # ── pre-renderer ──────────────────────────────────────────────────
 
