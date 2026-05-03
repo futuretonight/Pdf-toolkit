@@ -2059,6 +2059,7 @@ class PDFViewerPane:
         self._vp = {"zoom": 1.0, "ox": 0, "oy": 0,
                     "drag_x": None, "drag_y": None}
         self._render_gen   = 0
+        self._resize_job   = None   # debounce handle for canvas Configure
 
         self._thumb_pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="thumb")
@@ -2074,10 +2075,21 @@ class PDFViewerPane:
             bg=DARK["border"], bd=0, sashrelief="flat")
         outer.pack(fill="both", expand=True)
 
-        left  = tk.Frame(outer, bg=DARK["bg"])
-        right = ttk.Frame(outer)
-        outer.add(left,  minsize=self.THUMB_W + 30, width=self.THUMB_W + 34)
-        outer.add(right, minsize=320)
+        left       = tk.Frame(outer, bg=DARK["bg"])
+        right_host = tk.Frame(outer, bg=DARK["bg"])
+        outer.add(left,       minsize=self.THUMB_W + 30, width=self.THUMB_W + 34)
+        outer.add(right_host, minsize=320)
+
+        # ── vertical split: canvas (top) vs. HDC bar + flag panel (bottom) ──
+        self._vpw = tk.PanedWindow(
+            right_host, orient="vertical", sashwidth=4,
+            bg=DARK["border"], bd=0, sashrelief="flat")
+        self._vpw.pack(fill="both", expand=True)
+
+        right    = tk.Frame(self._vpw, bg=DARK["bg"])   # top: nav + canvas
+        self._bot_pane = tk.Frame(self._vpw, bg=DARK["surface"])  # bottom: hdc + flags
+        self._vpw.add(right,          minsize=180, stretch="always")
+        self._vpw.add(self._bot_pane, minsize=50,  height=54, stretch="never")
 
         # ── thumbnail strip ────────────────────────────────────────────
         lhdr = tk.Frame(left, bg=DARK["panel"])
@@ -2188,9 +2200,9 @@ class PDFViewerPane:
         self._cnv.bind("<Prior>", lambda _e: self.goto(self._cur_page - 1))
         self._cnv.bind("<Next>",  lambda _e: self.goto(self._cur_page + 1))
 
-        # ── HDC status bar ─────────────────────────────────────────────
-        hbar = tk.Frame(right, bg=DARK["surface"], height=22)
-        hbar.pack(fill="x", padx=4, pady=(0, 4))
+        # ── HDC status bar — lives in the guaranteed bottom pane ────────
+        hbar = tk.Frame(self._bot_pane, bg=DARK["surface"], height=22)
+        hbar.pack(fill="x", padx=4, pady=(2, 0))
         hbar.pack_propagate(False)
 
         self._hdc_lbl = tk.Label(
@@ -2206,8 +2218,8 @@ class PDFViewerPane:
                                    width=180, height=22)
         self._sim_bar.pack(side="right", padx=4)
 
-        # ── PDF flag panel (collapsible, below HDC bar) ────────────────
-        self._flag_panel = PDFFlagPanel(right, log_widget, self)
+        # ── PDF flag panel — anchored in bottom pane, always visible ────
+        self._flag_panel = PDFFlagPanel(self._bot_pane, self.log, self)
 
     # ── open / index ──────────────────────────────────────────────────
 
@@ -2462,11 +2474,11 @@ class PDFViewerPane:
         vp = self._vp
         cw = max(self._cnv.winfo_width(),  300)
         ch = max(self._cnv.winfo_height(), 300)
-        base  = min(cw / img.width, ch / img.height, 1.0)
+        base  = min(cw / img.width, ch / img.height)
         total = base * vp["zoom"]
         nw = max(1, int(img.width  * total))
         nh = max(1, int(img.height * total))
-        rsmp = Image.LANCZOS if total < 2 else Image.NEAREST
+        rsmp = Image.LANCZOS
         try:
             from PIL import ImageTk
             photo = ImageTk.PhotoImage(img.resize((nw, nh), rsmp))
@@ -2519,6 +2531,18 @@ class PDFViewerPane:
         self._cnv.configure(cursor="crosshair")
 
     def _on_cnv_configure(self, _e):
+        # Debounce: cancel any pending redraw and reschedule 80 ms out.
+        # This prevents a flood of full PIL resize+PhotoImage operations
+        # during every pixel of window drag (the jitter fix).
+        if self._resize_job is not None:
+            try:
+                self._cnv.after_cancel(self._resize_job)
+            except Exception:
+                pass
+        self._resize_job = self._cnv.after(80, self._on_resize_done)
+
+    def _on_resize_done(self):
+        self._resize_job = None
         if self._pil_main:
             self._zoom_fit()
 
@@ -2582,6 +2606,11 @@ class PDFViewerPane:
         self._index_cancel.set()
         if self._prerender:
             self._prerender.stop()
+        if self._resize_job is not None:
+            try:
+                self._cnv.after_cancel(self._resize_job)
+            except Exception:
+                pass
         self._thumb_pool.shutdown(wait=False)
 
 
@@ -2885,7 +2914,7 @@ class PDFFlagPanel:
 
         # ── outer collapsible frame ───────────────────────────────────
         self.outer = tk.Frame(parent, bg=DARK["surface"])
-        self.outer.pack(fill="x", padx=4, pady=(0, 4))
+        self.outer.pack(fill="both", expand=True, padx=4, pady=(0, 4))
 
         # toggle header
         hdr = tk.Frame(self.outer, bg=DARK["surface"], height=28)
@@ -2905,9 +2934,8 @@ class PDFFlagPanel:
             font=("Consolas", 7))
         self._health_badge.pack(side="right", padx=8)
 
-        # collapsible body
-        self._body = tk.Frame(self.outer, bg=DARK["bg"],
-                               height=self.PANEL_H)
+        # collapsible body — fill=both so notebook uses all available pane height
+        self._body = tk.Frame(self.outer, bg=DARK["bg"])
         # body is NOT packed initially — toggled on demand
 
         # notebook inside body
@@ -2921,15 +2949,37 @@ class PDFFlagPanel:
 
     # ── collapse / expand ────────────────────────────────────────────
 
+    _VPW_EXPANDED_H = 260   # bot_pane height when panel is open
+
     def toggle(self):
         self._expanded = not self._expanded
         if self._expanded:
-            self._body.pack(fill="x")
-            self.outer.configure(height=self.PANEL_H + 28)
+            self._body.pack(fill="both", expand=True)
             self._toggle_lbl.config(text="▼  PDF Structure & Flags")
+            # grow the bottom pane by moving the sash
+            try:
+                vpw = self._viewer.frame.nametowidget(
+                    self._viewer._vpw.winfo_pathname(
+                        self._viewer._vpw.winfo_id()))
+            except Exception:
+                vpw = None
+            if vpw is None:
+                vpw = self._viewer._vpw
+            try:
+                total = vpw.winfo_height()
+                vpw.sash_place(0, 0,
+                               max(60, total - self._VPW_EXPANDED_H))
+            except Exception:
+                pass
         else:
             self._body.pack_forget()
             self._toggle_lbl.config(text="▶  PDF Structure & Flags")
+            try:
+                vpw = self._viewer._vpw
+                total = vpw.winfo_height()
+                vpw.sash_place(0, 0, max(60, total - 54))
+            except Exception:
+                pass
 
     # ── XREF / Health tab ────────────────────────────────────────────
 
