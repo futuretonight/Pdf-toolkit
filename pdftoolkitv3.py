@@ -2645,6 +2645,8 @@ class PDFViewerPane:
         self._resize_job = None
         if self._pil_main:
             self._zoom_fit()
+
+    def _open_flags_popup(self):
         """Create or raise the Structure & Flags popup window."""
         if self._flags_win is not None:
             try:
