@@ -3906,6 +3906,51 @@ class ConverterApp(TkBase):
         self.bind_all("<Button-4>",   self._global_wheel, add="+")
         self.bind_all("<Button-5>",   self._global_wheel, add="+")
 
+    def show_about(self):
+        msg = (
+            "Abyss Toolkit (PDF Toolkit V3)\n\n"
+            "Author: ._neutron_. (GitHub: futuretonight)\n"
+            "License: GPL 3.0\n\n"
+            "Self-updating mechanism from GitHub is enabled."
+        )
+        messagebox.showinfo("About", msg)
+
+    def check_for_updates(self):
+        import urllib.request
+        import threading
+        
+        def _do_update():
+            try:
+                url = "https://raw.githubusercontent.com/futuretonight/Pdf-toolkit/main/pdftoolkitv3.py"
+                req = urllib.request.Request(url, headers={'Cache-Control': 'no-cache'})
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    remote_code = response.read().decode('utf-8')
+                
+                with open(__file__, 'r', encoding='utf-8') as f:
+                    local_code = f.read()
+                    
+                if remote_code.strip() != local_code.strip():
+                    self.after(0, prompt_update, remote_code)
+                else:
+                    self.after(0, lambda: messagebox.showinfo("Up to Date", "You are running the latest version from GitHub."))
+            except Exception as e:
+                self.after(0, lambda e=e: messagebox.showerror("Update Error", f"Failed to check for updates:\n{e}"))
+
+        def prompt_update(remote_code):
+            if messagebox.askyesno("Update Available", "A new version is available on GitHub! Do you want to update and restart?"):
+                try:
+                    with open(__file__, 'w', encoding='utf-8') as f:
+                        f.write(remote_code)
+                    messagebox.showinfo("Update Complete", "Update downloaded. The application will now restart.")
+                    import subprocess
+                    subprocess.Popen([sys.executable, __file__] + sys.argv[1:])
+                    self.destroy()
+                    sys.exit(0)
+                except Exception as e:
+                    messagebox.showerror("Update Error", f"Failed to apply update:\n{e}")
+
+        threading.Thread(target=_do_update, daemon=True).start()
+
     def _global_wheel(self, event):
         """Route mousewheel to the nearest scrollable ancestor of event.widget."""
         if event.num == 4:    delta = -1
@@ -3952,7 +3997,7 @@ class ConverterApp(TkBase):
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
 
-        tk.Label(hdr, text="  ⬡  ABYSS TOOLKIT  ·  PC EDITION",
+        tk.Label(hdr, text="  ⬡ pdf toolkit V3  ·  PC EDITION",
                  bg=DARK["panel"], fg=DARK["accent"],
                  font=("Consolas", 13, "bold")).pack(side="left", pady=10)
 
@@ -3965,6 +4010,16 @@ class ConverterApp(TkBase):
         self.lbl_ram = tk.Label(self.stats_frame, text="RAM –", bg=DARK["panel"],
                                 fg=DARK["text_dim"], font=("Consolas", 8))
         self.lbl_ram.pack(side="left", padx=6)
+
+        btn_about = tk.Button(self.stats_frame, text="About", bg=DARK["btn"], fg=DARK["text"],
+                              activebackground=DARK["btn_hover"], activeforeground=DARK["text"],
+                              relief="flat", cursor="hand2", command=self.show_about)
+        btn_about.pack(side="left", padx=10)
+
+        btn_update = tk.Button(self.stats_frame, text="Check for Updates", bg=DARK["btn"], fg=DARK["text"],
+                               activebackground=DARK["btn_hover"], activeforeground=DARK["text"],
+                               relief="flat", cursor="hand2", command=self.check_for_updates)
+        btn_update.pack(side="left", padx=10)
 
         sep = tk.Frame(self, bg=DARK["border"], height=1)
         sep.pack(fill="x")
